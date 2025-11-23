@@ -1,9 +1,9 @@
 from pydantic import PostgresDsn, field_validator
 from pydantic_settings import BaseSettings
-from typing import Any
+from typing import Any, Generator
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-
+from sqlalchemy.orm import sessionmaker, Session
 
 class DatabaseSettings(BaseSettings):
     DATABASE_URL: PostgresDsn
@@ -22,14 +22,20 @@ class DatabaseSettings(BaseSettings):
 
 db_settings = DatabaseSettings()
 
-
-# ✅ This function was missing — now added
 def get_database_url() -> str:
     return str(db_settings.DATABASE_URL)
 
-
-# ✅ Engine using psycopg3
 engine = create_engine(get_database_url(), echo=False)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# ✅ FASTAPI CORRECT DEPENDENCY
+def get_db() -> Generator[Session, None, None]:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def test_db_connection() -> bool:
