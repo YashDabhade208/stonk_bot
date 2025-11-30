@@ -114,18 +114,18 @@ class NewsCrawler:
                 return None
 
             article = Article(url)
-            article.set_html(html)
+            article.download(input_html=html)  # Using download with input_html instead of set_html
             article.parse()
             article.nlp()
 
             content = article.text or ""
             sentiment = self.analyze_sentiment(content)
-            stocks = self.extract_stocks(article.title + " " + content)
+            stocks = self.extract_stocks(article.title + " " + content if article.title else content)
 
             return {
                 'title': article.title or "No title",
                 'text': content,
-                'summary': article.summary,
+                'summary': article.summary or "",
                 'publish_date': article.publish_date.isoformat() if article.publish_date else None,
                 'url': url,
                 'source': "",
@@ -135,7 +135,7 @@ class NewsCrawler:
             }
 
         except Exception as e:
-            logger.error(f"Article parse failed {url}: {str(e)}")
+            logger.error(f"Article parse failed {url}: {str(e)}", exc_info=True)  # Added exc_info for better debugging
             return None
 
     async def crawl_source(self, source: Dict) -> List[Dict]:
