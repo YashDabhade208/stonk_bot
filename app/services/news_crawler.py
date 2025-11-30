@@ -6,9 +6,12 @@ from typing import List, Dict, Optional
 import logging
 from datetime import datetime
 from fake_useragent import UserAgent
-import json
+import re
 
 logger = logging.getLogger(__name__)
+
+
+NSE_STOCK_PATTERN = re.compile(r'\b[A-Z]{2,10}\b')
 
 
 class NewsCrawler:
@@ -18,38 +21,44 @@ class NewsCrawler:
         self.headers = {
             'User-Agent': ua.random,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Language': 'en-IN,en;q=0.9',
             'DNT': '1',
             'Connection': 'keep-alive'
         }
 
         self.timeout = aiohttp.ClientTimeout(total=40)
-        self.connector = aiohttp.TCPConnector(
-            limit=10,
-            ssl=False,
-            ttl_dns_cache=300,
-            enable_cleanup_closed=True
-        )
+        self.connector = aiohttp.TCPConnector(limit=10, ssl=False)
 
+        # ✅ INDIAN MARKET SOURCES
         self.sources = [
             {
-                'name': 'Yahoo Finance',
-                'url': 'https://finance.yahoo.com/topic/latest-news/',
+                'name': 'Moneycontrol',
+                'url': 'https://www.moneycontrol.com/news/business/stocks/',
                 'selectors': {
-                    'articles': 'a.subtle-link',
+                    'articles': 'li.clearfix a',
                     'link_attr': 'href',
-                    'base_url': 'https://finance.yahoo.com',
-                    'max_articles': 5
+                    'base_url': '',
+                    'max_articles': 8
                 }
             },
             {
-                'name': 'MarketWatch',
-                'url': 'https://www.marketwatch.com/latest-news',
+                'name': 'Economic Times',
+                'url': 'https://economictimes.indiatimes.com/markets/stocks/news',
                 'selectors': {
-                    'articles': 'h3.article__headline a',
+                    'articles': 'div.eachStory h3 a',
                     'link_attr': 'href',
-                    'base_url': 'https://www.marketwatch.com',
-                    'max_articles': 5
+                    'base_url': 'https://economictimes.indiatimes.com',
+                    'max_articles': 8
+                }
+            },
+            {
+                'name': 'LiveMint',
+                'url': 'https://www.livemint.com/market',
+                'selectors': {
+                    'articles': 'h2.headline a',
+                    'link_attr': 'href',
+                    'base_url': '',
+                    'max_articles': 6
                 }
             }
         ]
@@ -60,8 +69,7 @@ class NewsCrawler:
         self.session = aiohttp.ClientSession(
             headers=self.headers,
             timeout=self.timeout,
-            connector=self.connector,
-            cookie_jar=aiohttp.DummyCookieJar()  # ✅ Prevent Yahoo cookie overflow crash
+            connector=self.connector
         )
         return self
 
@@ -71,7 +79,7 @@ class NewsCrawler:
 
     async def fetch_url(self, url: str) -> Optional[str]:
         try:
-            async with self.session.get(url, allow_redirects=True) as response:
+            async with self.session.get(url) as response:
                 if response.status != 200:
                     logger.warning(f"HTTP {response.status} for {url}")
                     return None
@@ -80,6 +88,25 @@ class NewsCrawler:
             logger.error(f"Fetch failed {url}: {str(e)}")
             return None
 
+    # ✅ STOCK SYMBOL EXTRACTION
+    def extract_stocks(self, text: str) -> List[str]:
+        matches = NSE_STOCK_PATTERN.findall(text.upper())
+        blacklist = {'RBI', 'SEBI', 'COVID', 'GDP', 'Q1', 'Q2', 'Q3', 'Q4'}
+        return list(set([m for m in matches if m not in blacklist]))
+
+    # ✅ SIMPLE SENTIMENT ENGINE
+    def analyze_sentiment(self, text: str) -> str:
+        bullish = ['surge', 'profit jump', 'beats estimates', 'strong growth', 'upgrade', 'record high']
+        bearish = ['fall', 'drop', 'loss', 'downgrade', 'weak outlook', 'plunge']
+
+        text_lower = text.lower()
+
+        if any(word in text_lower for word in bullish):
+            return "Bullish"
+        if any(word in text_lower for word in bearish):
+            return "Bearish"
+        return "Neutral"
+
     async def extract_article_content(self, url: str) -> Optional[Dict]:
         try:
             html = await self.fetch_url(url)
@@ -87,25 +114,23 @@ class NewsCrawler:
                 return None
 
             article = Article(url)
-
-            # Works for both newspaper3k and newspaper4k
-            if hasattr(article, "set_html"):
-                article.set_html(html)
-            else:
-                article.download(input_html=html)
-
+            article.set_html(html)
             article.parse()
             article.nlp()
 
+            content = article.text or ""
+            sentiment = self.analyze_sentiment(content)
+            stocks = self.extract_stocks(article.title + " " + content)
+
             return {
                 'title': article.title or "No title",
-                'text': article.text,
+                'text': content,
                 'summary': article.summary,
-                'authors': article.authors,
                 'publish_date': article.publish_date.isoformat() if article.publish_date else None,
                 'url': url,
-                'keywords': article.keywords,
-                'top_image': article.top_image,
+                'source': "",
+                'sentiment': sentiment,
+                'mentioned_stocks': stocks,
                 'scraped_at': datetime.utcnow().isoformat()
             }
 
@@ -115,40 +140,32 @@ class NewsCrawler:
 
     async def crawl_source(self, source: Dict) -> List[Dict]:
         articles = []
-        logger.info(f"Crawling {source['name']}...")
-
         html = await self.fetch_url(source['url'])
         if not html:
-            logger.warning(f"No HTML from {source['name']}")
             return articles
 
         soup = BeautifulSoup(html, 'html.parser')
         links = soup.select(source['selectors']['articles'])
-        max_articles = source['selectors']['max_articles']
 
-        logger.info(f"Found {len(links)} links on {source['name']}")
-
-        for i, link in enumerate(links[:max_articles]):
+        for link in links[:source['selectors']['max_articles']]:
             href = link.get(source['selectors']['link_attr'])
             if not href:
                 continue
-
             if not href.startswith('http'):
                 href = source['selectors']['base_url'] + href
 
-            data = await self.extract_article_content(href)
-            if data:
-                data['source'] = source['name']
-                articles.append(data)
+            article = await self.extract_article_content(href)
+            if article:
+                article['source'] = source['name']
+                articles.append(article)
 
-            await asyncio.sleep(1)  # polite delay
+            await asyncio.sleep(1)
 
-        logger.info(f"{source['name']} -> {len(articles)} articles extracted")
         return articles
 
     async def crawl_all_sources(self) -> List[Dict]:
         results = await asyncio.gather(
-            *[self.crawl_source(source) for source in self.sources],
+            *[self.crawl_source(src) for src in self.sources],
             return_exceptions=True
         )
 
@@ -156,22 +173,4 @@ class NewsCrawler:
         for r in results:
             if isinstance(r, list):
                 all_articles.extend(r)
-
         return all_articles
-
-    def save_to_json(self, articles: List[Dict], filename: str = 'news_articles.json'):
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(articles, f, indent=2, ensure_ascii=False, default=str)
-        logger.info(f"Saved {len(articles)} articles to {filename}")
-
-
-# Standalone test
-async def main():
-    async with NewsCrawler() as crawler:
-        articles = await crawler.crawl_all_sources()
-        print(f"✅ Crawled {len(articles)} articles")
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
