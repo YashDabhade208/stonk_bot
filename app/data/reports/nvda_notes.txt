@@ -1,0 +1,3 @@
+NVIDIA is heavily focused on AI and data center growth.
+Risks include dependence on a small number of large customers,
+regulatory scrutiny, and competition from other chip makers.
